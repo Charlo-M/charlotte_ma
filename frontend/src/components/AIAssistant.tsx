@@ -11,43 +11,15 @@ import {
   Minimize2,
   Briefcase,
 } from 'lucide-react';
-import { analyzeJobMatch, sendMessageToGemini } from '../services/geminiService';
+import { analyzeJobMatch, analyzeJobMatchUrl, sendMessageToGemini } from '../services/geminiService';
 import { ChatMessage } from '../types';
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-type ExtractJobApiOk = { jobText: string; title?: string; site?: string };
-type ExtractJobApiErr = { error: string };
-
-const EXTRACTOR_URL = import.meta.env.VITE_EXTRACTOR_URL || 'http://localhost:5179';
-
 function isProbablyUrl(text: string): boolean {
   const t = text.trim();
   return /^https?:\/\/\S+$/i.test(t);
-}
-
-async function extractJobFromUrl(url: string): Promise<{ jobText: string; meta?: string } | null> {
-  try {
-    const resp = await fetch(`${EXTRACTOR_URL}/api/extract-job`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-    });
-
-    const data = (await resp.json()) as ExtractJobApiOk | ExtractJobApiErr;
-
-    if (!resp.ok) return null;
-    if (!('jobText' in data) || typeof data.jobText !== 'string') return null;
-
-    const metaParts: string[] = [];
-    if (data.site) metaParts.push(data.site);
-    if (data.title) metaParts.push(data.title);
-
-    return { jobText: data.jobText, meta: metaParts.length ? metaParts.join(' • ') : undefined };
-  } catch {
-    return null;
-  }
 }
 
 const AIAssistant: React.FC = () => {
@@ -127,34 +99,13 @@ const AIAssistant: React.FC = () => {
 
     try {
       if (isJobMode) {
-        let jdText = content;
+        const looksUrl = isProbablyUrl(content);
 
-        // If user pasted a URL, extract job description text first
-        if (isProbablyUrl(jdText)) {
-          pushBot('Got the link. Fetching the job description content…');
-
-          const extracted = await extractJobFromUrl(jdText);
-
-          if (!extracted) {
-            pushBot(
-              "I couldn’t fetch the job description from that link (many job sites block browser scraping). Please paste the full job description text directly for an accurate analysis."
-            );
-            setIsProcessing(false);
-            return;
-          }
-
-          // Optional: show meta info
-          if (extracted.meta) {
-            pushBot(`Extracted job content from: ${extracted.meta}`);
-          } else {
-            pushBot('Job content extracted. Running match analysis…');
-          }
-
-          jdText = extracted.jobText;
+        if (looksUrl) {
+          pushBot('Got the link. Extracting the job description and running match analysis…');
         }
 
-        // Now analyze actual job description text
-        const analysis = await analyzeJobMatch(jdText);
+        const analysis = looksUrl ? await analyzeJobMatchUrl(content) : await analyzeJobMatch(content);
 
         if (analysis) {
           const botMsg: ChatMessage = {
@@ -167,9 +118,15 @@ const AIAssistant: React.FC = () => {
           setMessages((prev) => [...prev, botMsg]);
           setIsJobMode(false);
         } else {
-          pushBot(
-            "I ran into an issue analyzing that job description. If you pasted a link, try pasting the full job description text instead."
-          );
+          if (looksUrl) {
+            pushBot(
+              "I couldn’t extract enough job text from that link (many job sites block scraping). Please paste the full job description text directly for an accurate analysis."
+            );
+          } else {
+            pushBot(
+              "I ran into an issue analyzing that job description. Please try again, or paste a slightly shorter JD if it's extremely long."
+            );
+          }
         }
       } else {
         const responseText = await sendMessageToGemini(content);
@@ -232,7 +189,6 @@ const AIAssistant: React.FC = () => {
                 ),
                 strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
                 em: ({ children }) => <em className="italic text-slate-100">{children}</em>,
-
                 a: ({ children, href }) => (
                   <a
                     href={href}
@@ -244,7 +200,6 @@ const AIAssistant: React.FC = () => {
                     {children}
                   </a>
                 ),
-
                 code: ({ inline, children }) =>
                   inline ? (
                     <code className="px-1.5 py-0.5 rounded bg-slate-950/60 border border-slate-700 text-slate-100 text-[0.85em] break-all">
