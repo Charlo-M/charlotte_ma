@@ -21,6 +21,21 @@ MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", "4000"))
 MAX_JD_CHARS = int(os.getenv("MAX_JD_CHARS", "12000"))
 MAX_REPEAT_RATIO = float(os.getenv("MAX_REPEAT_RATIO", "0.35"))
 
+# Only block truly dangerous injection patterns; allow common JD language like "you must".
+BLOCK_REASONS = {
+    "ignore-previous-instructions",
+    "override-system-developer",
+    "forget-previous-context",
+    "role-hijack-you-are-now",
+    "dan-style-jailbreak",
+    "system/developer-exfiltration",
+    "prompt-exfiltration",
+    "prompt-exfiltration-print",
+    "secrets-exfiltration-attempt",
+    "prompt-delimiter-injection",
+    "tool-injection-attempt",
+}
+
 
 def _quota_status_from_error(msg: str) -> int:
     m = (msg or "").lower()
@@ -77,12 +92,15 @@ def root():
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     filtered = sanitize_user_text(req.message, MAX_USER_CHARS, MAX_REPEAT_RATIO)
-    if filtered.flagged:
+
+    # Block only high-risk injection attempts
+    if filtered.flagged and any(r in BLOCK_REASONS for r in filtered.reasons):
         raise HTTPException(
             status_code=400,
             detail={"error": "Prompt injection detected.", "reasons": filtered.reasons},
         )
 
+    # For low-risk flags (e.g., "you must"), proceed using the sanitized wrapper
     full_user = f"""{PROFILE_CTX}
 
 [User Question]
@@ -114,19 +132,27 @@ def job_match(req: JobMatchRequest):
     else:
         raise HTTPException(status_code=400, detail={"error": "Provide either url or jobDescription."})
 
-    # 2) Sanitize input
+    # 2) Sanitize JD input (tiered blocking)
     filtered = sanitize_user_text(jd_text, MAX_JD_CHARS, MAX_REPEAT_RATIO)
-    if filtered.flagged:
+
+    # Block only high-risk injection patterns; allow normal JD language like "you must apply..."
+    if filtered.flagged and any(r in BLOCK_REASONS for r in filtered.reasons):
         raise HTTPException(
             status_code=400,
             detail={"error": "Prompt injection detected in JD.", "reasons": filtered.reasons},
         )
 
+    jd_clean = filtered.cleaned
+
+    # If the JD was flagged for low-risk reasons, append a note to meta (optional but useful for debugging/UI)
+    if filtered.flagged and filtered.reasons:
+        meta = (meta + " • " if meta else "") + f"sanitized:{','.join(filtered.reasons)}"
+
     # 3) Compose prompt with profile context
     user_prompt = f"""{PROFILE_CTX}
 
 [Job Description]{f" (source: {meta})" if meta else ""}
-\"\"\"{filtered.cleaned}\"\"\"
+\"\"\"{jd_clean}\"\"\"
 
 Return JSON ONLY that matches the required schema.
 """.strip()
@@ -150,7 +176,7 @@ Your previous output was invalid JSON or did not match the schema.
 Fix it and output ONLY valid JSON matching the schema.
 
 [Job Description]
-\"\"\"{filtered.cleaned}\"\"\"
+\"\"\"{jd_clean}\"\"\"
 """.strip()
 
             raw2 = generate_text(
